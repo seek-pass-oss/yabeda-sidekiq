@@ -73,9 +73,10 @@ module Yabeda
 
         stats = ::Sidekiq::Stats.new
         queues = ::Sidekiq::Queue.all
-        known_queues = stats.queues.keys | queues.map(&:name)
+        stats_queues = stats.queues
+        known_queues = stats_queues.keys | queues.map(&:name)
 
-        stats.queues.each do |k, v|
+        stats_queues.each do |k, v|
           sidekiq_jobs_waiting_count.set({ queue: k }, v)
         end
         sidekiq_active_workers_count.set({}, stats.workers_size)
