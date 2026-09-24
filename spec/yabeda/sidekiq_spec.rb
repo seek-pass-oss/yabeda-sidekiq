@@ -270,6 +270,62 @@ RSpec.describe Yabeda::Sidekiq do
       expect(Sidekiq::ScheduledSet).not_to have_received(:new)
     end
 
+    context "when job sets are segmented by queue" do
+      around do |example|
+        config = described_class.config
+        previous = [
+          config.retries_segmented_by_queue,
+          config.dead_segmented_by_queue,
+          config.scheduled_segmented_by_queue,
+        ]
+        configurators = Yabeda.configurators.to_a
+
+        config.retries_segmented_by_queue = true
+        config.dead_segmented_by_queue = true
+        config.scheduled_segmented_by_queue = true
+        reconfigure_yabeda(configurators)
+
+        example.run
+      ensure
+        config.retries_segmented_by_queue, config.dead_segmented_by_queue, config.scheduled_segmented_by_queue = previous
+        reconfigure_yabeda(configurators)
+      end
+
+      before do
+        allow(Sidekiq::RetrySet).to receive(:new).and_return(
+          [{ "queue" => "default" }, { "queue" => "default" }],
+        )
+        allow(Sidekiq::DeadSet).to receive(:new).and_return(
+          [{ "queue" => "mailers" }],
+        )
+        allow(Sidekiq::ScheduledSet).to receive(:new).and_return(
+          [{ "queue" => "default" }],
+        )
+      end
+
+      it "declares retry, dead, and scheduled gauges with a queue tag" do
+        expect(Yabeda.sidekiq.jobs_retry_count.tags).to eq(%i[queue])
+        expect(Yabeda.sidekiq.jobs_dead_count.tags).to eq(%i[queue])
+        expect(Yabeda.sidekiq.jobs_scheduled_count.tags).to eq(%i[queue])
+      end
+
+      it "publishes per-queue counts and zero-fills known queues" do
+        expect { Yabeda.collect! }.to \
+          update_yabeda_gauge(Yabeda.sidekiq.jobs_retry_count).with(
+            { queue: "default" } => 2,
+            { queue: "mailers" } => 0,
+          ).and \
+            update_yabeda_gauge(Yabeda.sidekiq.jobs_dead_count).with(
+              { queue: "default" } => 0,
+              { queue: "mailers" } => 1,
+            ).and \
+              update_yabeda_gauge(Yabeda.sidekiq.jobs_scheduled_count).with(
+                { queue: "default" } => 1,
+                { queue: "mailers" } => 0,
+              )
+      end
+    end
+
     it "measures maximum runtime of currently running jobs", sidekiq: :inline do
       workers = []
       workers.push(Thread.new { SampleLongRunningJob.perform_async })
@@ -349,6 +405,13 @@ RSpec.describe Yabeda::Sidekiq do
         { queue: "only_in_set" } => 1,
       )
     end
+  end
+
+  def reconfigure_yabeda(configurators)
+    Yabeda.reset!
+    Yabeda.register_adapter(:test, Yabeda::TestAdapter.instance)
+    configurators.each { |_group, block| Yabeda.configure(&block) }
+    Yabeda.configure!
   end
 
   def add_reroute_jobs_middleware
