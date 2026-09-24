@@ -258,6 +258,18 @@ RSpec.describe Yabeda::Sidekiq do
             update_yabeda_gauge(Yabeda.sidekiq.jobs_scheduled_count).with(2)
     end
 
+    it "does not iterate job sets when segmentation is disabled" do
+      allow(Sidekiq::RetrySet).to receive(:new).and_call_original
+      allow(Sidekiq::DeadSet).to receive(:new).and_call_original
+      allow(Sidekiq::ScheduledSet).to receive(:new).and_call_original
+
+      Yabeda.collect!
+
+      expect(Sidekiq::RetrySet).not_to have_received(:new)
+      expect(Sidekiq::DeadSet).not_to have_received(:new)
+      expect(Sidekiq::ScheduledSet).not_to have_received(:new)
+    end
+
     it "measures maximum runtime of currently running jobs", sidekiq: :inline do
       workers = []
       workers.push(Thread.new { SampleLongRunningJob.perform_async })
@@ -286,6 +298,56 @@ RSpec.describe Yabeda::Sidekiq do
         update_yabeda_gauge(Yabeda.sidekiq.running_job_runtime).with(
           { queue: "default", worker: "SampleLongRunningJob" } => 0.0,
         )
+    end
+  end
+
+  describe ".counts_by_queue" do
+    it "tallies jobs by queue and skips blank queues" do
+      jobs = [
+        { "queue" => "default" },
+        { "queue" => "default" },
+        { "queue" => "mailers" },
+        { "queue" => nil },
+        { "queue" => "" },
+      ]
+
+      expect(described_class.counts_by_queue(jobs)).to eq("default" => 2, "mailers" => 1)
+    end
+  end
+
+  describe ".publish_job_set_size" do
+    it "publishes the cluster total when segmentation is disabled" do
+      expect do
+        described_class.publish_job_set_size(
+          Yabeda.sidekiq.jobs_retry_count,
+          size: 7,
+          segmented: false,
+          set: -> { raise "should not iterate the set" },
+          known_queues: %w[default],
+        )
+      end.to update_yabeda_gauge(Yabeda.sidekiq.jobs_retry_count).with(7)
+    end
+
+    it "publishes per-queue counts and zero-fills known queues" do
+      jobs = [
+        { "queue" => "default" },
+        { "queue" => "default" },
+        { "queue" => "only_in_set" },
+      ]
+
+      expect do
+        described_class.publish_job_set_size(
+          Yabeda.sidekiq.jobs_waiting_count,
+          size: 99,
+          segmented: true,
+          set: -> { jobs },
+          known_queues: %w[default mailers],
+        )
+      end.to update_yabeda_gauge(Yabeda.sidekiq.jobs_waiting_count).with(
+        { queue: "default" } => 2,
+        { queue: "mailers" } => 0,
+        { queue: "only_in_set" } => 1,
+      )
     end
   end
 
